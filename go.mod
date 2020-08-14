@@ -1,5 +1,5 @@
-module mmdb
+module github.com/akzj/mmdb
 
 go 1.14
 
-require github.com/fatih/structs v1.1.0 // indirect
+require github.com/google/btree v1.0.0

@@ -1,41 +1,31 @@
 package mmdb
 
-const (
-	KeyTypeInt64 KeyType = 1
+import (
+	"container/list"
+	"github.com/google/btree"
 )
 
-type KeyType int
-
-type Key interface {
-	Type() KeyType
-	Value() interface{}
+type Less func(left interface{}, right interface{}) bool
+type ItemIterator func(obj interface{}) bool
+type Item struct {
+	less Less
+	obj  interface{}
+	l    *list.List
 }
 
-func newKey(obj interface{}) Key {
-	switch val := obj.(type) {
-	case int64:
-		return &int64Key{val: val}
-	}
-	return nil
-}
-
-type int64Key struct {
-	val int64
-}
-
-func (KeyType KeyType) String() string {
-	switch KeyType {
-	case KeyTypeInt64:
-		return "int64"
-	default:
-		panic("unknown type")
+func newItem(less Less, obj interface{}) *Item {
+	return &Item{
+		less: less,
+		obj:  obj,
 	}
 }
-
-func (i int64Key) Type() KeyType {
-	return KeyTypeInt64
+func (i *Item) list() *list.List {
+	if i.l == nil {
+		i.l = list.New()
+	}
+	return i.l
 }
 
-func (i int64Key) Value() interface{} {
-	return i.val
+func (i *Item) Less(item btree.Item) bool {
+	return i.less(i.obj, item.(*Item).obj)
 }
