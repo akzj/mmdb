@@ -59,8 +59,10 @@ type Options struct {
 	JournalDir     string
 	SnapshotDir    string
 	MaxJournalSize int64
-	Recovery       bool
-	New            func() Item
+	//Truncate journal files when reload journal error happen
+	Truncate  bool
+	SyncWrite bool
+	New       func() Item
 }
 
 func OpenDB(options Options) (DB, error) {
@@ -110,8 +112,15 @@ func DefaultOptions() Options {
 		JournalDir:     "journal",
 		SnapshotDir:    "snapshot",
 		MaxJournalSize: 1024 * 1024 * 128,
-		Recovery:       false,
+		Truncate:       false,
+		SyncWrite:      true,
+		New:            nil,
 	}
+}
+
+func (opts Options) WithSyncWrite(val bool) Options {
+	opts.SyncWrite = val
+	return opts
 }
 
 func (opts Options) WithNew(f func() Item) Options {
@@ -135,7 +144,7 @@ func (opts Options) WithMaxJournalSize(val int64) Options {
 	return opts
 }
 func (opts Options) WithRecovery(val bool) Options {
-	opts.Recovery = val
+	opts.Truncate = val
 	return opts
 }
 
@@ -267,6 +276,9 @@ func (t *transaction) Commit() error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	defer t.Discard()
+	if t.pending.Len() == 0 {
+		return nil
+	}
 	if err := t.db.commit(t, func(e error) {
 		err = e
 		wg.Done()
@@ -322,6 +334,7 @@ func (db *db) newTransaction(update bool) (*transaction, error) {
 	}
 	readTS, btree := db.getReadTSBtree()
 	return &transaction{
+		sync:    db.SyncWrite,
 		db:      db,
 		pending: pending,
 		bTree:   btree,
@@ -370,7 +383,7 @@ func (db *db) cleanupBtreeWithTSs() {
 	if len(db.btreeWithTSs) > 0 {
 		diff := readDoneUntil - db.btreeWithTSs[0].TS
 		_assertTrue(diff >= 0)
-		if diff > 64 {
+		if diff > 32 {
 			copy(db.btreeWithTSs, db.btreeWithTSs[diff:])
 			db.btreeWithTSs = db.btreeWithTSs[:len(db.btreeWithTSs)-int(diff)]
 		}
@@ -500,7 +513,7 @@ func (db *db) journalCompaction(done func()) {
 			db.closeWG.Done()
 			done()
 		}()
-		db.oracle.WaitForMark(committedTS)
+		db.oracle.WaitCommittedTSMark(committedTS)
 		tx, err := db.NewTransaction(false)
 		if err == ErrDBClose {
 			return
@@ -738,7 +751,7 @@ func (db *db) reloadJournal(committedTS int64) error {
 			})
 			if err != nil {
 				if err == io.ErrUnexpectedEOF {
-					if db.Recovery == false {
+					if db.Truncate == false {
 						return err
 					}
 					if err := j.truncate(); err != nil {
@@ -938,9 +951,7 @@ func (o *oracle) CommittedDone(ts int64) {
 	o.committedMark.DoneMark(ts)
 }
 
-func (o *oracle) WaitForMark(index int64) {
-	o.readMark.BeginMark(index)
-
+func (o *oracle) WaitCommittedTSMark(index int64) {
 	//wait for committed index done
 	_assert(o.committedMark.WaitForMark(context.Background(), index))
 }
@@ -1124,7 +1135,7 @@ func sortFile(files []string) {
 
 func _assertTrue(val bool) {
 	if val == false {
-		log.Fatalf("%+v", errors.Errorf("assert failed"))
+		panic(fmt.Sprintf("%+v", errors.Errorf("assert failed")))
 	}
 }
 

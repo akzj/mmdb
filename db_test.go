@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/dgraph-io/badger"
 	"github.com/google/btree"
 	"github.com/pkg/errors"
+
 	"io"
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 /*func TestName(t *testing.T) {
@@ -214,7 +217,7 @@ func TestRecoveryJournal(t *testing.T) {
 	}
 	wg.Wait()
 	//wait for transaction commit done
-	db.oracle.WaitForMark(db.oracle.nextTS - 1)
+	db.oracle.WaitCommittedTSMark(db.oracle.nextTS - 1)
 
 	db.CloseWait()
 	f, err := os.OpenFile("journal/0.log", os.O_RDWR, 0666)
@@ -236,6 +239,46 @@ func TestRecoveryJournal(t *testing.T) {
 	_assertTrue(db.oracle.nextTS == lastNextTS-1)
 }
 
+func TestCleanupCommittedTX(t *testing.T) {
+	defer func() {
+		os.RemoveAll(DefaultOptions().JournalDir)
+		os.RemoveAll(DefaultOptions().SnapshotDir)
+	}()
+	db, err := openDB(DefaultOptions().WithNew(func() Item {
+		return new(intItem)
+	}))
+	_assert(err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			_assert(db.Update(func(tx Transaction) error {
+				tx.ReplaceOrInsert(newIntItem(i))
+				return nil
+			}))
+		}()
+	}
+	wg.Wait()
+
+	_assert(db.Update(func(tx Transaction) error {
+		return nil
+	}))
+	db.cleanupBtreeWithTSs()
+	//wait for transaction commit done
+	db.oracle.WaitCommittedTSMark(db.oracle.nextTS - 1)
+
+	fmt.Println(len(db.oracle.committedTxns))
+	_assertTrue(len(db.oracle.committedTxns) < 100)
+
+	fmt.Println("read done until", db.oracle.readMark.DoneUntil())
+	fmt.Println("len btreeWithTSs", len(db.btreeWithTSs))
+	fmt.Println("first btreeWithTSs ts", db.btreeWithTSs[0].TS)
+	_assertTrue(len(db.btreeWithTSs) < 100)
+}
+
 func TestWatermark_BeginMark(t *testing.T) {
 	wm := newWatermark()
 
@@ -243,4 +286,50 @@ func TestWatermark_BeginMark(t *testing.T) {
 	wm.DoneMark(1)
 
 	wm.WaitForMark(context.Background(), 1)
+}
+
+func BenchmarkBtreeReplaceOrInsert(b *testing.B) {
+	tree := btree.New(10)
+
+	for i := 0; i < b.N; i++ {
+		tree.ReplaceOrInsert(newIntItem(i))
+	}
+}
+
+func Test_markDb_Update(t *testing.T) {
+	db, err := openDB(DefaultOptions().WithNew(func() Item {
+		return new(intItem)
+	}).WithSyncWrite(false))
+	_assert(err)
+	tx, _ := db.NewTransaction(true)
+	begin := time.Now()
+	count := 1000000
+	for i := 0; i < count; i++ {
+		tx.ReplaceOrInsert(newIntItem(i))
+		if i%100 == 0 {
+			_assert(tx.Commit())
+			tx, _ = db.NewTransaction(true)
+		}
+	}
+	fmt.Println(float64(count) / time.Now().Sub(begin).Seconds())
+}
+
+func TestBadgerDB(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("badger").WithSyncWrites(false))
+	_assert(err)
+
+	tx := db.NewTransaction(true)
+
+	begin := time.Now()
+	count := 1000000
+	for i := 0; i < count; i++ {
+		var buffer bytes.Buffer
+		binary.Write(&buffer, binary.BigEndian, int64(i))
+		_assert(tx.Set(buffer.Bytes(), buffer.Bytes()))
+		if i%100 == 0 {
+			_assert(tx.Commit())
+			tx = db.NewTransaction(true)
+		}
+	}
+	fmt.Println(float64(count) / time.Now().Sub(begin).Seconds())
 }
