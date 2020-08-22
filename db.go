@@ -118,6 +118,26 @@ func (opts Options) WithNew(f func() Item) Options {
 	opts.New = f
 	return opts
 }
+func (opts Options) WithBtreeDegree(val int) Options {
+	opts.BtreeDegree = val
+	return opts
+}
+func (opts Options) WithJournalDir(val string) Options {
+	opts.JournalDir = val
+	return opts
+}
+func (opts Options) WithSnapshotDir(val string) Options {
+	opts.SnapshotDir = val
+	return opts
+}
+func (opts Options) WithMaxJournalSize(val int64) Options {
+	opts.MaxJournalSize = val
+	return opts
+}
+func (opts Options) WithRecovery(val bool) Options {
+	opts.Recovery = val
+	return opts
+}
 
 type btreeWithTS struct {
 	TS int64
@@ -248,7 +268,6 @@ func (t *transaction) Commit() error {
 	wg.Add(1)
 	defer t.Discard()
 	if err := t.db.commit(t, func(e error) {
-		fmt.Println("callback")
 		err = e
 		wg.Done()
 	}); err != nil {
@@ -284,12 +303,16 @@ func (db *db) getReadTSBtree() (int64, *btree.BTree) {
 	readTS := db.oracle.GetReadTS()
 	db.btreeWithTSsLock.RLock()
 	diff := readTS - db.btreeWithTSs[0].TS
-	btree := db.btreeWithTSs[diff].BTree
+	btree := db.btreeWithTSs[diff].BTree.Clone()
 	db.btreeWithTSsLock.RUnlock()
 	return readTS, btree
 }
 
 func (db *db) NewTransaction(update bool) (Transaction, error) {
+	return db.newTransaction(update)
+}
+
+func (db *db) newTransaction(update bool) (*transaction, error) {
 	if db.checkClose() {
 		return nil, ErrDBClose
 	}
@@ -306,25 +329,25 @@ func (db *db) NewTransaction(update bool) (Transaction, error) {
 	}, nil
 }
 
-func (db *db) Update(callback func(tx Transaction) error) error {
+func (db *db) Update(update func(tx Transaction) error) error {
 	tx, err := db.NewTransaction(true)
 	if err != nil {
 		return err
 	}
 	defer tx.Discard()
-	if err := callback(tx); err != nil {
+	if err := update(tx); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (db *db) View(callback func(tx Transaction) error) error {
+func (db *db) View(view func(tx Transaction) error) error {
 	tx, err := db.NewTransaction(false)
 	if err != nil {
 		return err
 	}
 	defer tx.Discard()
-	return callback(tx)
+	return view(tx)
 }
 
 func (db *db) Close() error {
@@ -407,7 +430,6 @@ func (db *db) doWriteCommitRequests(requests []commitRequest) {
 	journal := db.journal
 	//write journal log
 	for _, request := range requests {
-		fmt.Println("request.commitTS", request.commitTS)
 		_assert(journal.append(request.commitTS, request.journalBuf))
 		if request.sync {
 			sync = true
@@ -451,7 +473,19 @@ func (db *db) doWriteCommitRequests(requests []commitRequest) {
 
 }
 
+//for test
+func (db *db) journalCompactionAndWait() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	db.journalCompaction(func() {
+		wg.Done()
+	})
+	wg.Wait()
+}
+
 func (db *db) journalCompaction(done func()) {
+	db.closeWG.Add(2)
+	defer db.closeWG.Done()
 	var err error
 	committedTS := db.journal.maxCommittedTS
 	_assert(db.journal.close())
@@ -463,6 +497,7 @@ func (db *db) journalCompaction(done func()) {
 	go func() {
 		defer func() {
 			atomic.StoreInt32(&db.journalC, 0)
+			db.closeWG.Done()
 			done()
 		}()
 		db.oracle.WaitForMark(committedTS)
@@ -672,24 +707,32 @@ func (db *db) reloadJournal(committedTS int64) error {
 		return err
 	}
 	sortFile(files)
+	var records int64
 	for _, file := range files {
-		err := func() error {
+		ts, err := strconv.ParseInt(strings.SplitN(filepath.Base(file), ".", 2)[0], 10, 64)
+		_assert(err)
+		if ts <= committedTS {
+			continue
+		}
+		err = func() error {
 			j, err := openJournal(file, db.New)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = j.close() }()
 			err = j.Range(func(ts int64, opRecords []opRecord) bool {
+				records++
 				if ts <= committedTS {
 					return true
 				}
+				committedTS = ts
+				db.oracle.nextTS = committedTS + 1
 				for _, record := range opRecords {
 					if record.delete {
 						db.btree.Delete(record.item)
 					} else {
 						db.btree.ReplaceOrInsert(record.item)
 					}
-					committedTS = ts
 				}
 				return true
 			})
@@ -717,7 +760,7 @@ func (db *db) reloadJournal(committedTS int64) error {
 	_assert(err)
 	db.journal.seekEnd()
 	fmt.Println("reload journal committedTS", committedTS)
-	db.oracle.nextTS = committedTS + 1
+	fmt.Println("reload journal record count", records)
 	return nil
 }
 
@@ -959,6 +1002,7 @@ type watermark struct {
 	waiters      map[int64][]chan interface{}
 }
 
+//for test
 func newWatermark() *watermark {
 	return newWatermarkWithCtx(context.Background())
 }

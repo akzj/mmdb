@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/google/btree"
 	"github.com/pkg/errors"
+	"io"
 	"os"
 	"sync"
 	"testing"
@@ -36,7 +37,7 @@ import (
 
 type intItem int
 
-func newInt64Item(val int) *intItem {
+func newIntItem(val int) *intItem {
 	return (*intItem)(&val)
 }
 
@@ -62,7 +63,7 @@ func (i *intItem) UnmarshalBinary(data []byte) error {
 }
 
 func TestInt64Item(t *testing.T) {
-	item := newInt64Item(123456789)
+	item := newIntItem(123456789)
 	data, err := item.MarshalBinary()
 	if err != nil {
 		t.Fatalf("%+v", err)
@@ -75,11 +76,11 @@ func TestInt64Item(t *testing.T) {
 	btree := btree.New(3)
 
 	for i := 0; i < 100; i++ {
-		btree.ReplaceOrInsert(newInt64Item(i))
+		btree.ReplaceOrInsert(newIntItem(i))
 	}
 
 	for i := 0; i < 100; i++ {
-		item := btree.Get(newInt64Item(i))
+		item := btree.Get(newIntItem(i))
 		_assertTrue(int(*item.(*intItem)) == int(i))
 	}
 }
@@ -95,7 +96,7 @@ func TestOpenDB(t *testing.T) {
 	_assert(err)
 	err = db.Update(func(tx Transaction) error {
 		for i := 0; i < 100; i++ {
-			tx.ReplaceOrInsert(newInt64Item(int(i)))
+			tx.ReplaceOrInsert(newIntItem(int(i)))
 		}
 		return nil
 	})
@@ -108,7 +109,7 @@ func TestOpenDB(t *testing.T) {
 	err = db.View(func(tx Transaction) error {
 		fmt.Println("readTS", tx.(*transaction).readTs)
 		for i := 0; i < 100; i++ {
-			item := tx.Get(newInt64Item(int(i)))
+			item := tx.Get(newIntItem(int(i)))
 			_assertTrue(int(*item.(*intItem)) == int(i))
 		}
 		return nil
@@ -125,7 +126,7 @@ func TestOpenDB(t *testing.T) {
 
 	err = db.View(func(tx Transaction) error {
 		for i := 0; i < 100; i++ {
-			item := tx.Get(newInt64Item(int(i)))
+			item := tx.Get(newIntItem(int(i)))
 			_assertTrue(int64(*item.(*intItem)) == int64(i))
 		}
 		return nil
@@ -151,12 +152,88 @@ func TestOpenDB(t *testing.T) {
 
 	err = db.View(func(tx Transaction) error {
 		for i := 0; i < 100; i++ {
-			item := tx.Get(newInt64Item(int(i)))
+			item := tx.Get(newIntItem(int(i)))
 			_assertTrue(int64(*item.(*intItem)) == int64(i))
 		}
 		return nil
 	})
+}
 
+func TestDb_Conflict(t *testing.T) {
+	db, err := openDB(DefaultOptions().WithNew(func() Item {
+		return new(intItem)
+	}))
+	_assert(err)
+
+	tx, err := db.newTransaction(true)
+	_assert(err)
+
+	tx2, err := db.newTransaction(true)
+	_assert(err)
+
+	tx.ReplaceOrInsert(newIntItem(1))
+	tx2.ReplaceOrInsert(newIntItem(1))
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	err = db.commit(tx, func(err error) {
+		_assert(err)
+		wg.Done()
+	})
+	_assert(err)
+	wg.Wait()
+
+	err = db.commit(tx2, func(err error) {
+		fmt.Println(err)
+	})
+	if err == nil {
+		_assert(fmt.Errorf("transaction no conflict"))
+	}
+}
+
+func TestRecoveryJournal(t *testing.T) {
+	defer func() {
+		os.RemoveAll(DefaultOptions().JournalDir)
+		os.RemoveAll(DefaultOptions().SnapshotDir)
+	}()
+	db, err := openDB(DefaultOptions().WithNew(func() Item {
+		return new(intItem)
+	}))
+	_assert(err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(val int) {
+			defer wg.Done()
+			db.Update(func(tx Transaction) error {
+				tx.ReplaceOrInsert(newIntItem(val))
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+	//wait for transaction commit done
+	db.oracle.WaitForMark(db.oracle.nextTS - 1)
+
+	db.CloseWait()
+	f, err := os.OpenFile("journal/0.log", os.O_RDWR, 0666)
+	_assert(err)
+	offset, err := f.Seek(-1, io.SeekEnd)
+	_assert(err)
+	fmt.Println(offset)
+	_assert(f.Truncate(offset))
+	_assert(f.Close())
+
+	lastNextTS := db.oracle.nextTS
+	fmt.Println(lastNextTS)
+	db, err = openDB(DefaultOptions().WithRecovery(true).
+		WithNew(func() Item {
+			return new(intItem)
+		}))
+	_assert(err)
+	fmt.Println(db.oracle.nextTS)
+	_assertTrue(db.oracle.nextTS == lastNextTS-1)
 }
 
 func TestWatermark_BeginMark(t *testing.T) {
