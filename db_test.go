@@ -296,6 +296,8 @@ func BenchmarkBtreeReplaceOrInsert(b *testing.B) {
 	}
 }
 
+//chan 347662
+//block-queue 569618
 func Test_markDb_Update(t *testing.T) {
 	db, err := openDB(DefaultOptions().WithNew(func() Item {
 		return new(intItem)

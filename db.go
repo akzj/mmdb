@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/akzj/block-queue"
 	"github.com/google/btree"
 	"github.com/pkg/errors"
 	"io"
@@ -74,19 +75,19 @@ func openDB(options Options) (*db, error) {
 	_assert(os.MkdirAll(options.SnapshotDir, 0777))
 	ctx, cancel := context.WithCancel(context.Background())
 	var db = &db{
-		Options:          options,
-		ctx:              ctx,
-		ctxCancel:        cancel,
-		locker:           sync.RWMutex{},
-		btree:            btree.New(options.BtreeDegree),
-		btreeWithTSs:     nil,
-		btreeWithTSsLock: sync.RWMutex{},
-		oracle:           newOracle(ctx),
-		journal:          nil,
-		journalC:         0,
-		closeWG:          sync.WaitGroup{},
-		isClose:          0,
-		commitRequests:   make(chan commitRequest, 128),
+		Options:            options,
+		ctx:                ctx,
+		ctxCancel:          cancel,
+		locker:             sync.RWMutex{},
+		btree:              btree.New(options.BtreeDegree),
+		btreeWithTSs:       nil,
+		btreeWithTSsLock:   sync.RWMutex{},
+		oracle:             newOracle(ctx),
+		journal:            nil,
+		journalC:           0,
+		closeWG:            sync.WaitGroup{},
+		isClose:            0,
+		commitRequestQueue: block_queue.NewQueue(128),
 	}
 	if err := db.reload(); err != nil {
 		cancel()
@@ -155,18 +156,18 @@ type btreeWithTS struct {
 
 type db struct {
 	Options
-	ctx              context.Context
-	ctxCancel        context.CancelFunc
-	locker           sync.RWMutex
-	btree            *btree.BTree
-	btreeWithTSs     []btreeWithTS
-	btreeWithTSsLock sync.RWMutex
-	oracle           *oracle
-	journal          *journal
-	journalC         int32
-	closeWG          sync.WaitGroup
-	isClose          int32
-	commitRequests   chan commitRequest
+	ctx                context.Context
+	ctxCancel          context.CancelFunc
+	locker             sync.RWMutex
+	btree              *btree.BTree
+	btreeWithTSs       []btreeWithTS
+	btreeWithTSsLock   sync.RWMutex
+	oracle             *oracle
+	journal            *journal
+	journalC           int32
+	closeWG            sync.WaitGroup
+	isClose            int32
+	commitRequestQueue *block_queue.Queue
 }
 
 type transaction struct {
@@ -369,7 +370,7 @@ func (db *db) Close() error {
 	}
 	//wait for committed update flush to log entry done
 	db.oracle.readMark.DoneMark(db.oracle.GetReadTS())
-	db.commitRequests <- commitRequest{close: true}
+	db.commitRequestQueue.Push(commitRequest{close: true})
 	return nil
 }
 
@@ -428,13 +429,13 @@ func (db *db) commit(tx *transaction, cb func(err error)) error {
 	_, err = buffer.Write(data)
 	_assert(err)
 
-	db.commitRequests <- commitRequest{
+	db.commitRequestQueue.Push(commitRequest{
 		journalBuf: &buffer,
 		pending:    tx.pending,
 		sync:       tx.sync,
 		commitTS:   tx.committedTS,
 		callback:   cb,
-	}
+	})
 	return nil
 }
 
@@ -543,25 +544,15 @@ func (db *db) writeCommitRequests() {
 		entries += request.pending.Len()
 		commitRequests = append(commitRequests, request)
 	}
+	var items []interface{}
 	for isClose == false {
-		select {
-		case request := <-db.commitRequests:
-			appendRequest(request)
-			for {
-				select {
-				case request := <-db.commitRequests:
-					if appendRequest(request); entries < 3000 {
-						continue
-					}
-				default:
-				}
-				if len(commitRequests) > 0 {
-					db.doWriteCommitRequests(commitRequests)
-					commitRequests = commitRequests[:0]
-					entries = 0
-				}
-			}
+		items = db.commitRequestQueue.PopAll(items)
+		for _, item := range items {
+			appendRequest(item.(commitRequest))
 		}
+		db.doWriteCommitRequests(commitRequests)
+		commitRequests = commitRequests[:0]
+		entries = 0
 	}
 }
 
