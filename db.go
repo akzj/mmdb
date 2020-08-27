@@ -231,14 +231,15 @@ func (t *transaction) Get(key Item) Item {
 	return item.(Item)
 }
 
+var opRecordPool = sync.Pool{New: func() interface{} { return new(opRecord) }}
 func (t *transaction) ReplaceOrInsert(item Item) Item {
 	if t.pending == nil {
 		panic("readOny transaction")
 	}
-	t.pending.ReplaceOrInsert(&opRecord{
-		item:   item,
-		delete: false,
-	})
+	opRecord := opRecordPool.Get().(*opRecord)
+	opRecord.item = item
+	opRecord.delete = false
+	t.pending.ReplaceOrInsert(opRecord)
 	old := t.bTree.ReplaceOrInsert(item)
 	if old == nil {
 		return nil
@@ -915,6 +916,17 @@ func (o *oracle) cleanCommittedTxn() {
 	if doneUntil >= o.committedTxns[0].ts {
 		diff := doneUntil - o.committedTxns[0].ts
 		if diff > 8 {
+			toGC := append([]committedTxn{},o.committedTxns[:diff]...)
+			go func() {
+				for _, txn := range toGC {
+					txn.conflictKeys.Descend(func(i btree.Item) bool {
+						record := i.(*opRecord)
+						record.item = nil
+						opRecordPool.Put(record)
+						return true
+					})
+				}
+			}()
 			copy(o.committedTxns, o.committedTxns[diff:])
 			o.committedTxns = o.committedTxns[:len(o.committedTxns)-int(diff)]
 		}

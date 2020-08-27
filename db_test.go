@@ -299,6 +299,10 @@ func BenchmarkBtreeReplaceOrInsert(b *testing.B) {
 //chan 347662
 //block-queue 569618
 func Test_markDb_Update(t *testing.T) {
+	defer func() {
+		os.RemoveAll(DefaultOptions().JournalDir)
+		os.RemoveAll(DefaultOptions().SnapshotDir)
+	}()
 	db, err := openDB(DefaultOptions().WithNew(func() Item {
 		return new(intItem)
 	}).WithSyncWrite(false))
@@ -308,7 +312,7 @@ func Test_markDb_Update(t *testing.T) {
 	count := 1000000
 	for i := 0; i < count; i++ {
 		tx.ReplaceOrInsert(newIntItem(i))
-		if i%100 == 0 {
+		if i%10 == 0 {
 			_assert(tx.Commit())
 			tx, _ = db.NewTransaction(true)
 		}
@@ -317,6 +321,9 @@ func Test_markDb_Update(t *testing.T) {
 }
 
 func TestBadgerDB(t *testing.T) {
+	defer func() {
+		os.RemoveAll("badger")
+	}()
 	db, err := badger.Open(badger.DefaultOptions("badger").WithSyncWrites(false))
 	_assert(err)
 
@@ -328,7 +335,7 @@ func TestBadgerDB(t *testing.T) {
 		var buffer bytes.Buffer
 		binary.Write(&buffer, binary.BigEndian, int64(i))
 		_assert(tx.Set(buffer.Bytes(), buffer.Bytes()))
-		if i%100 == 0 {
+		if i%10 == 0 {
 			_assert(tx.Commit())
 			tx = db.NewTransaction(true)
 		}
