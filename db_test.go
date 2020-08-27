@@ -317,7 +317,19 @@ func Test_markDb_Update(t *testing.T) {
 			tx, _ = db.NewTransaction(true)
 		}
 	}
-	fmt.Println(float64(count) / time.Now().Sub(begin).Seconds())
+	_assert(tx.Commit())
+	fmt.Println("write items/second", float64(count)/time.Now().Sub(begin).Seconds())
+
+	begin = time.Now()
+	db.View(func(tx Transaction) error {
+		for i := 0; i < count; i++ {
+			if tx.Get(newIntItem(i)) == nil {
+				t.Fatalf("get %d failed", i)
+			}
+		}
+		return nil
+	})
+	fmt.Println("read items/second", int64(float64(count)/time.Now().Sub(begin).Seconds()))
 }
 
 func TestBadgerDB(t *testing.T) {
@@ -340,5 +352,18 @@ func TestBadgerDB(t *testing.T) {
 			tx = db.NewTransaction(true)
 		}
 	}
-	fmt.Println(float64(count) / time.Now().Sub(begin).Seconds())
+	_assert(tx.Commit())
+	fmt.Println("write items/second", float64(count)/time.Now().Sub(begin).Seconds())
+	begin = time.Now()
+	db.View(func(txn *badger.Txn) error {
+		for i := 0; i < count; i++ {
+			var buffer bytes.Buffer
+			binary.Write(&buffer, binary.BigEndian, int64(i))
+			if _, err := txn.Get(buffer.Bytes()); err != nil {
+				t.Fatalf(err.Error())
+			}
+		}
+		return nil
+	})
+	fmt.Println("read items/second", int64(float64(count)/time.Now().Sub(begin).Seconds()))
 }
