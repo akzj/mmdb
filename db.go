@@ -232,6 +232,7 @@ func (t *transaction) Get(key Item) Item {
 }
 
 var opRecordPool = sync.Pool{New: func() interface{} { return new(opRecord) }}
+
 func (t *transaction) ReplaceOrInsert(item Item) Item {
 	if t.pending == nil {
 		panic("readOny transaction")
@@ -273,21 +274,26 @@ func (t *transaction) AscendRange(greaterOrEqual, lessThan Item, callback func(i
 	})
 }
 
+var _chanPool = sync.Pool{New: func() interface{} {
+	return make(chan interface{}, 1)
+}}
+
 func (t *transaction) Commit() error {
 	var err error
-	var wg sync.WaitGroup
-	wg.Add(1)
+	ch := _chanPool.Get().(chan interface{})
 	defer t.Discard()
 	if t.pending.Len() == 0 {
 		return nil
 	}
 	if err := t.db.commit(t, func(e error) {
 		err = e
-		wg.Done()
+		//wg.Done()
+		ch <- struct{}{}
 	}); err != nil {
 		return err
 	}
-	wg.Wait()
+	<-ch
+	_chanPool.Put(ch)
 	return err
 }
 
@@ -916,7 +922,7 @@ func (o *oracle) cleanCommittedTxn() {
 	if doneUntil >= o.committedTxns[0].ts {
 		diff := doneUntil - o.committedTxns[0].ts
 		if diff > 8 {
-			toGC := append([]committedTxn{},o.committedTxns[:diff]...)
+			toGC := append([]committedTxn{}, o.committedTxns[:diff]...)
 			go func() {
 				for _, txn := range toGC {
 					txn.conflictKeys.Descend(func(i btree.Item) bool {
@@ -1023,7 +1029,7 @@ func newWatermark() *watermark {
 
 func newWatermarkWithCtx(ctx context.Context) *watermark {
 	wm := &watermark{
-		marks:        make(chan mark),
+		marks:        make(chan mark, 128),
 		int64Heap:    new(Int64Heap),
 		pendingCount: make(map[int64]int),
 		waiters:      make(map[int64][]chan interface{}),
