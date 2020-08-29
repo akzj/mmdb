@@ -44,6 +44,9 @@ type Transaction interface {
 	Get(Item) Item
 	ReplaceOrInsert(Item) Item
 	Delete(Item)
+	// AscendRange calls the iterator for every value in the tree within the range
+	// [greaterOrEqual, lessThan), until iterator returns false.
+	AscendRange(greaterOrEqual, lessThan Item, callback func(item Item) bool)
 	Commit() error
 	CommitWith(cb func(err error))
 	Discard() error
@@ -266,8 +269,6 @@ func NewEntryWithKey(key []byte) *KVItem {
 	return &KVItem{key: key}
 }
 
-// AscendRange calls the iterator for every value in the tree within the range
-// [greaterOrEqual, lessThan), until iterator returns false.
 func (t *transaction) AscendRange(greaterOrEqual, lessThan Item, callback func(item Item) bool) {
 	t.bTree.Clone().AscendRange(greaterOrEqual, lessThan, func(i btree.Item) bool {
 		return callback(i.(Item))
