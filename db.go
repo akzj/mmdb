@@ -37,7 +37,6 @@ const maxValueLen = 1024 * 1024 * 64 //64MB
 type Item interface {
 	Less(other btree.Item) bool
 	MarshalBinary() (data []byte, err error)
-	UnmarshalBinary(data []byte) error
 }
 
 type Transaction interface {
@@ -58,15 +57,17 @@ type DB interface {
 	Close() error
 }
 
+type UnmarshalBinary func(data []byte) (Item, error)
+
 type Options struct {
 	BtreeDegree    int
 	JournalDir     string
 	SnapshotDir    string
 	MaxJournalSize int64
 	//Truncate journal files when reload journal error happen
-	Truncate  bool
-	SyncWrite bool
-	New       func() Item
+	Truncate        bool
+	SyncWrite       bool
+	UnmarshalBinary UnmarshalBinary
 }
 
 func OpenDB(options Options) (DB, error) {
@@ -112,13 +113,13 @@ func openDB(options Options) (*db, error) {
 
 func DefaultOptions() Options {
 	return Options{
-		BtreeDegree:    10,
-		JournalDir:     "journal",
-		SnapshotDir:    "snapshot",
-		MaxJournalSize: 1024 * 1024 * 128,
-		Truncate:       false,
-		SyncWrite:      true,
-		New:            nil,
+		BtreeDegree:     10,
+		JournalDir:      "journal",
+		SnapshotDir:     "snapshot",
+		MaxJournalSize:  1024 * 1024 * 128,
+		Truncate:        false,
+		SyncWrite:       true,
+		UnmarshalBinary: nil,
 	}
 }
 
@@ -127,8 +128,8 @@ func (opts Options) WithSyncWrite(val bool) Options {
 	return opts
 }
 
-func (opts Options) WithNew(f func() Item) Options {
-	opts.New = f
+func (opts Options) WithUnmarshalBinary(f UnmarshalBinary) Options {
+	opts.UnmarshalBinary = f
 	return opts
 }
 func (opts Options) WithBtreeDegree(val int) Options {
@@ -193,12 +194,16 @@ type opRecord struct {
 	delete bool
 }
 
-func (record *opRecord) UnmarshalBinary(data []byte) error {
+func (record *opRecord) UnmarshalBinary(data []byte, UnmarshalBinary UnmarshalBinary) error {
 	var reader = bytes.NewReader(data)
 	if err := binary.Read(reader, binary.BigEndian, &record.delete); err != nil {
 		return err
 	}
-	return record.item.UnmarshalBinary(data[1:])
+	var err error
+	if record.item, err = UnmarshalBinary(data[1:]); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (record *opRecord) MarshalBinary() (data []byte, err error) {
@@ -515,7 +520,7 @@ func (db *db) journalCompaction(done func()) {
 	_assert(db.journal.rename())
 	name := filepath.Join(db.JournalDir,
 		strconv.FormatInt(committedTS+1, 10)+journalExt)
-	db.journal, err = openJournal(name, db.New)
+	db.journal, err = openJournal(name, db.UnmarshalBinary)
 	_assert(err)
 	go func() {
 		defer func() {
@@ -684,9 +689,9 @@ func (db *db) reloadSnapshot() error {
 		if _, err := io.ReadFull(reader, data); err != nil {
 			return errors.WithStack(err)
 		}
-		var item = db.New()
-		if err := item.UnmarshalBinary(data); err != nil {
-			return errors.WithStack(err)
+		var item, err = db.UnmarshalBinary(data)
+		if err != nil {
+			return err
 		}
 		db.btree.ReplaceOrInsert(item)
 	}
@@ -717,7 +722,7 @@ func (db *db) reloadJournal(committedTS int64) error {
 	}
 	if len(files) == 0 {
 		name := filepath.Join(db.JournalDir, "0"+journalExt)
-		db.journal, err = openJournal(name, db.New)
+		db.journal, err = openJournal(name, db.UnmarshalBinary)
 		return err
 	}
 	sortFile(files)
@@ -729,7 +734,7 @@ func (db *db) reloadJournal(committedTS int64) error {
 			continue
 		}
 		err = func() error {
-			j, err := openJournal(file, db.New)
+			j, err := openJournal(file, db.UnmarshalBinary)
 			if err != nil {
 				return err
 			}
@@ -770,7 +775,7 @@ func (db *db) reloadJournal(committedTS int64) error {
 			return err
 		}
 	}
-	db.journal, err = openJournal(files[len(files)-1], db.New)
+	db.journal, err = openJournal(files[len(files)-1], db.UnmarshalBinary)
 	_assert(err)
 	db.journal.seekEnd()
 	fmt.Println("reload journal committedTS", committedTS)
@@ -780,22 +785,22 @@ func (db *db) reloadJournal(committedTS int64) error {
 
 type journal struct {
 	sync.Mutex
-	file           string
-	f              *os.File
-	maxCommittedTS int64
-	reloadOffset   int64
-	New            func() Item
+	file            string
+	f               *os.File
+	maxCommittedTS  int64
+	reloadOffset    int64
+	unmarshalBinary UnmarshalBinary
 }
 
-func openJournal(filename string, New func() Item) (*journal, error) {
+func openJournal(filename string, unmarshalBinary UnmarshalBinary) (*journal, error) {
 	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
 	}
 	return &journal{
-		file: filename,
-		f:    f,
-		New:  New,
+		file:            filename,
+		f:               f,
+		unmarshalBinary: unmarshalBinary,
 	}, nil
 }
 
@@ -827,8 +832,8 @@ func (j *journal) Range(callback func(committedTS int64, items []opRecord) bool)
 			return err
 		}
 		if eType == itemType {
-			var record = opRecord{item: j.New()}
-			_assert(record.UnmarshalBinary(data))
+			var record = opRecord{}
+			_assert(record.UnmarshalBinary(data, j.unmarshalBinary))
 			opRecords = append(opRecords, record)
 		} else if eType == commitType {
 			var commit commitEntry

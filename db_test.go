@@ -93,8 +93,12 @@ func TestOpenDB(t *testing.T) {
 		os.RemoveAll(DefaultOptions().JournalDir)
 		os.RemoveAll(DefaultOptions().SnapshotDir)
 	}()
-	db, err := openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 	_assert(err)
 	err = db.Update(func(tx Transaction) error {
@@ -123,8 +127,12 @@ func TestOpenDB(t *testing.T) {
 	db.CloseWait()
 
 	//reload journal
-	db, err = openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err = openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 
 	err = db.View(func(tx Transaction) error {
@@ -148,8 +156,12 @@ func TestOpenDB(t *testing.T) {
 
 	_assert(os.RemoveAll(db.JournalDir))
 
-	db, err = openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err = openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 	_assert(err)
 
@@ -167,8 +179,12 @@ func TestDb_Conflict(t *testing.T) {
 		os.RemoveAll(DefaultOptions().JournalDir)
 		os.RemoveAll(DefaultOptions().SnapshotDir)
 	}()
-	db, err := openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 	_assert(err)
 
@@ -203,8 +219,12 @@ func TestRecoveryJournal(t *testing.T) {
 		os.RemoveAll(DefaultOptions().JournalDir)
 		os.RemoveAll(DefaultOptions().SnapshotDir)
 	}()
-	db, err := openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 	_assert(err)
 
@@ -234,10 +254,13 @@ func TestRecoveryJournal(t *testing.T) {
 
 	lastNextTS := db.oracle.nextTS
 	fmt.Println(lastNextTS)
-	db, err = openDB(DefaultOptions().WithRecovery(true).
-		WithNew(func() Item {
-			return new(intItem)
-		}))
+	db, err = openDB(DefaultOptions().WithRecovery(true).WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
+	}))
 	_assert(err)
 	fmt.Println(db.oracle.nextTS)
 	_assertTrue(db.oracle.nextTS == lastNextTS-1)
@@ -248,8 +271,12 @@ func TestCleanupCommittedTX(t *testing.T) {
 		os.RemoveAll(DefaultOptions().JournalDir)
 		os.RemoveAll(DefaultOptions().SnapshotDir)
 	}()
-	db, err := openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}))
 	_assert(err)
 
@@ -319,8 +346,12 @@ func Test_markDb_Update(t *testing.T) {
 		os.RemoveAll(DefaultOptions().JournalDir)
 		os.RemoveAll(DefaultOptions().SnapshotDir)
 	}()
-	db, err := openDB(DefaultOptions().WithNew(func() Item {
-		return new(intItem)
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
 	}).WithSyncWrite(false))
 	_assert(err)
 	tx, _ := db.NewTransaction(true)
