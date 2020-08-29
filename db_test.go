@@ -339,6 +339,40 @@ func BenchmarkBtreeReplaceOrInsert(b *testing.B) {
 	}
 }
 
+func TestDBReplace(t *testing.T) {
+	defer func() {
+		os.RemoveAll(DefaultOptions().JournalDir)
+		os.RemoveAll(DefaultOptions().SnapshotDir)
+	}()
+	db, err := openDB(DefaultOptions().WithUnmarshalBinary(func(data []byte) (Item, error) {
+		var item intItem
+		if err := item.UnmarshalBinary(data); err != nil {
+			return nil, err
+		}
+		return &item, nil
+	}).WithSyncWrite(false))
+	_assert(err)
+
+	for i := 0; i < 100; i++ {
+		_assert(db.Update(func(tx Transaction) error {
+			tx.ReplaceOrInsert(newIntItem(1000))
+			tx.ReplaceOrInsert(newIntItem(i))
+			return nil
+		}))
+		var count int
+		_assert(db.View(func(tx Transaction) error {
+			tx.AscendRange(newIntItem(0), newIntItem(10000), func(item Item) bool {
+				count++
+				return true
+			})
+			return nil
+		}))
+		if count != i+2 {
+			t.Fatal(count,i)
+		}
+	}
+}
+
 //chan 347662
 //block-queue 569618
 func Test_markDb_Update(t *testing.T) {

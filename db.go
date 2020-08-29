@@ -265,7 +265,7 @@ func (t *transaction) Delete(item Item) Item {
 		item:   item,
 		delete: true,
 	})
-	if old == nil{
+	if old == nil {
 		return nil
 	}
 	return old.(Item)
@@ -333,7 +333,6 @@ func (db *db) getReadTSBtree() (int64, *btree.BTree) {
 	readTS := db.oracle.GetReadTS()
 	db.btreeWithTSsLock.RLock()
 	diff := readTS - db.btreeWithTSs[0].TS
-	//fmt.Println(readTS,db.btreeWithTSs[0].TS,diff,len(db.btreeWithTSs))
 	btree := db.btreeWithTSs[diff].BTree.Clone()
 	db.btreeWithTSsLock.RUnlock()
 	return readTS, btree
@@ -916,9 +915,11 @@ func newOracle(ctx context.Context) *oracle {
 
 func (o *oracle) checkConflict(tx *transaction) bool {
 	for _, it := range o.committedTxns {
-		if it.ts < tx.readTs {
+		if it.ts <= tx.readTs {
+			//committedTxn is done
 			continue
 		}
+		fmt.Println("it.ts", it.ts, "tx.committedTS", tx.committedTS, "tx.readTs", tx.readTs)
 		var conflict bool
 		tx.pending.Ascend(func(i btree.Item) bool {
 			if it.conflictKeys.Get(i) != nil {
