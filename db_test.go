@@ -163,6 +163,10 @@ func TestOpenDB(t *testing.T) {
 }
 
 func TestDb_Conflict(t *testing.T) {
+	defer func() {
+		os.RemoveAll(DefaultOptions().JournalDir)
+		os.RemoveAll(DefaultOptions().SnapshotDir)
+	}()
 	db, err := openDB(DefaultOptions().WithNew(func() Item {
 		return new(intItem)
 	}))
@@ -220,7 +224,7 @@ func TestRecoveryJournal(t *testing.T) {
 	db.oracle.WaitCommittedTSMark(db.oracle.nextTS - 1)
 
 	db.CloseWait()
-	f, err := os.OpenFile("journal/0.log", os.O_RDWR, 0666)
+	f, err := os.OpenFile("journal/100.log", os.O_RDWR, 0666)
 	_assert(err)
 	offset, err := f.Seek(-1, io.SeekEnd)
 	_assert(err)
@@ -263,14 +267,26 @@ func TestCleanupCommittedTX(t *testing.T) {
 	}
 	wg.Wait()
 
+	db.View(func(tx Transaction) error {
+		for i := 0; i < 100; i++ {
+			if tx.Get(newIntItem(i)) == nil {
+				t.Fatalf("no find %d", i)
+			}
+		}
+		return nil
+	})
+
 	_assert(db.Update(func(tx Transaction) error {
 		return nil
 	}))
-	db.cleanupBtreeWithTSs()
 	//wait for transaction commit done
-	db.oracle.WaitCommittedTSMark(db.oracle.nextTS - 1)
+	db.oracle.WaitReadTSMark(db.oracle.nextTS - 1)
+	fmt.Println("db.oracle.nextTS - 1", db.oracle.nextTS-1)
+	fmt.Println("db.oracle.readMark.DoneUntil()", db.oracle.readMark.DoneUntil())
+	db.cleanupBtreeWithTSs()
+	db.oracle.cleanCommittedTxn()
 
-	fmt.Println(len(db.oracle.committedTxns))
+	fmt.Println("db.oracle.committedTxns", len(db.oracle.committedTxns))
 	_assertTrue(len(db.oracle.committedTxns) < 100)
 
 	fmt.Println("read done until", db.oracle.readMark.DoneUntil())

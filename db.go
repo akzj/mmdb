@@ -324,6 +324,7 @@ func (db *db) getReadTSBtree() (int64, *btree.BTree) {
 	readTS := db.oracle.GetReadTS()
 	db.btreeWithTSsLock.RLock()
 	diff := readTS - db.btreeWithTSs[0].TS
+	//fmt.Println(readTS,db.btreeWithTSs[0].TS,diff,len(db.btreeWithTSs))
 	btree := db.btreeWithTSs[diff].BTree.Clone()
 	db.btreeWithTSsLock.RUnlock()
 	return readTS, btree
@@ -536,6 +537,7 @@ func (db *db) journalCompaction(done func()) {
 }
 
 func (db *db) writeCommitRequests() {
+	db.closeWG.Add(1)
 	defer func() {
 		_assert(db.journal.close())
 		_assert(db.journal.rename())
@@ -922,7 +924,7 @@ func (o *oracle) cleanCommittedTxn() {
 	doneUntil := o.committedMark.DoneUntil()
 	if doneUntil >= o.committedTxns[0].ts {
 		diff := doneUntil - o.committedTxns[0].ts
-		if diff > 8 {
+		if diff > 32 {
 			toGC := append([]committedTxn{}, o.committedTxns[:diff]...)
 			go func() {
 				for _, txn := range toGC {
@@ -964,6 +966,11 @@ func (o *oracle) CommittedDone(ts int64) {
 func (o *oracle) WaitCommittedTSMark(index int64) {
 	//wait for committed index done
 	_assert(o.committedMark.WaitForMark(context.Background(), index))
+}
+
+func (o *oracle) WaitReadTSMark(index int64) {
+	//wait for committed index done
+	_assert(o.readMark.WaitForMark(context.Background(), index))
 }
 
 func (o *oracle) GetReadTS() int64 {
