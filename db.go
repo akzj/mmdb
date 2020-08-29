@@ -42,7 +42,7 @@ type Item interface {
 type Transaction interface {
 	Get(Item) Item
 	ReplaceOrInsert(Item) Item
-	Delete(Item)
+	Delete(Item) Item
 	// AscendRange calls the iterator for every value in the tree within the range
 	// [greaterOrEqual, lessThan), until iterator returns false.
 	AscendRange(greaterOrEqual, lessThan Item, callback func(item Item) bool)
@@ -54,7 +54,7 @@ type DB interface {
 	NewTransaction(write bool) (Transaction, error)
 	Update(func(tx Transaction) error) error
 	View(func(tx Transaction) error) error
-	Close() error
+	Close(ctx context.Context) error
 }
 
 type UnmarshalBinary func(data []byte) (Item, error)
@@ -256,15 +256,19 @@ func (t *transaction) ReplaceOrInsert(item Item) Item {
 	return old.(Item)
 }
 
-func (t *transaction) Delete(item Item) {
+func (t *transaction) Delete(item Item) Item {
 	if t.pending == nil {
 		panic("readOny transaction")
 	}
-	t.bTree.Delete(item)
+	old := t.bTree.Delete(item)
 	t.pending.ReplaceOrInsert(&opRecord{
 		item:   item,
 		delete: true,
 	})
+	if old == nil{
+		return nil
+	}
+	return old.(Item)
 }
 
 func NewEntryWithKey(key []byte) *KVItem {
@@ -378,19 +382,27 @@ func (db *db) View(view func(tx Transaction) error) error {
 	return view(tx)
 }
 
-func (db *db) Close() error {
-	if atomic.CompareAndSwapInt32(&db.isClose, 0, 1) == false {
-		return nil
+func (db *db) Close(ctx context.Context) error {
+	if atomic.CompareAndSwapInt32(&db.isClose, 0, 1) {
+		//wait for committed update flush to log entry done
+		db.oracle.readMark.DoneMark(db.oracle.GetReadTS())
+		db.commitRequestQueue.Push(commitRequest{close: true})
 	}
-	//wait for committed update flush to log entry done
-	db.oracle.readMark.DoneMark(db.oracle.GetReadTS())
-	db.commitRequestQueue.Push(commitRequest{close: true})
-	return nil
+	ch := make(chan interface{})
+	go func() {
+		db.closeWG.Wait()
+		close(ch)
+	}()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (db *db) CloseWait() {
-	_assert(db.Close())
-	db.closeWG.Wait()
+	_assert(db.Close(context.Background()))
 }
 
 func (db *db) cleanupBtreeWithTSs() {
